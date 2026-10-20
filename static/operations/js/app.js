@@ -1,0 +1,126 @@
+(() => {
+  const $ = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  $$("[data-permission]").forEach(node => { node.hidden = true; });
+  const csrf = () => document.cookie.split("; ").map(x => x.trim()).find(x => x.startsWith("csrftoken="))?.split("=")[1] || "";
+  const state = {stations: [], parcels: [], trips: [], categories: [], drivers: [], user: null, view: "dashboard"};
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+  const money = value => `₦${Number(value || 0).toLocaleString("en-NG", {maximumFractionDigits: 0})}`;
+  const date = value => value ? new Date(value).toLocaleDateString("en-NG", {day:"2-digit",month:"short"}) : "—";
+  const time = value => value ? new Date(value).toLocaleTimeString("en-NG", {hour:"2-digit",minute:"2-digit"}) : "—";
+  const api = async (url, options = {}, retry = true) => {
+    const access = sessionStorage.getItem("transcitis_access");
+    const headers = {...(options.body ? {"Content-Type":"application/json"} : {}), ...(options.method && options.method !== "GET" ? {"X-CSRFToken":csrf()} : {}), ...(access ? {"Authorization":`Bearer ${access}`} : {}), ...(options.headers || {})};
+    const response = await fetch(url, {...options, headers, credentials:"same-origin"});
+    if (response.status === 401 && retry && !url.includes("/auth/")) {
+      try { const refresh = sessionStorage.getItem("transcitis_refresh"); const r = await fetch("/api/auth/refresh/", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(refresh?{refresh}:{})}); if(!r.ok) throw Error(); const tokens=await r.json(); if(tokens.access) sessionStorage.setItem("transcitis_access",tokens.access); if(tokens.refresh) sessionStorage.setItem("transcitis_refresh",tokens.refresh); return api(url, options, false); } catch { sessionStorage.clear(); location.href="/login/"; throw new Error("Your session has expired. Please sign in again."); }
+    }
+    if (!response.ok) {
+      let message = `Request failed (${response.status})`;
+      try { const data = await response.json(); message = data.detail || data.pin?.[0] || data.destination?.[0] || data.non_field_errors?.[0] || Object.values(data).flat().join(" ") || message; } catch {}
+      throw new Error(message);
+    }
+    if ((response.headers.get("content-type") || "").includes("application/json")) return response.json();
+    return response;
+  };
+  const toast = (message, error = false) => { const node = document.createElement("div"); node.className = `toast${error ? " error" : ""}`; node.textContent = message; $("#toast-region").append(node); setTimeout(() => node.remove(), 3400); };
+  const statusStyle = status => ({registered:"gray",ready:"blue",on_trip:"yellow",received:"green",pickup:"green",out_for_delivery:"blue",collected:"gray",delivered:"gray"}[status] || "gray");
+  const statusPill = item => `<span class="status-pill ${statusStyle(item.status)}">${escapeHtml(item.status_label || item.status)}</span>`;
+  const route = item => `<span class="route-cell">${escapeHtml(item.origin_name || "—")} <span class="route-arrow">→</span> ${escapeHtml(item.destination_name || "—")}</span>`;
+  const parcelRow = item => `<tr data-parcel="${escapeHtml(item.parcel_id)}"><td>${escapeHtml(item.parcel_id)}</td><td><span class="receiver-cell"><b>${escapeHtml(item.sender_name)}</b><small>${escapeHtml(item.sender_phone)}</small></span></td><td><span class="receiver-cell"><b>${escapeHtml(item.receiver_name)}</b><small>${escapeHtml(item.receiver_phone)}</small></span></td><td>${route(item)}</td><td>${money(item.charge)}</td><td>${statusPill(item)}</td><td><button class="icon-button row-more" data-parcel="${escapeHtml(item.parcel_id)}" aria-label="Parcel details">···</button></td></tr>`;
+  const recentRow = item => `<tr><td>${escapeHtml(item.parcel_id)}</td><td><span class="receiver-cell"><b>${escapeHtml(item.receiver_name)}</b><small>${escapeHtml(item.receiver_phone)}</small></span></td><td>${route(item)}</td><td>${date(item.created_at)} <span style="color:#aaa">· ${time(item.created_at)}</span></td><td>${statusPill(item)}</td><td><button class="icon-button row-more" data-parcel="${escapeHtml(item.parcel_id)}" aria-label="Parcel details">···</button></td></tr>`;
+  const listRows = (items, target, empty, rowFn, cols) => { $(target).innerHTML = items.length ? items.map(rowFn).join("") : `<tr><td colspan="${cols}" class="empty-cell">${empty}</td></tr>`; };
+  const loadMe = async () => { const {user} = await api("/api/auth/me/"); state.user = user; sessionStorage.setItem("transcitis_user", JSON.stringify(user)); const permissions=user.permissions||[]; $$("[data-permission]").forEach(n=>{const key=n.dataset.permission;n.hidden=!(user.is_superadmin||permissions.includes("*")||permissions.includes(key)||(key==="parcels.view"&&permissions.includes("parcels.view_assigned")));}); const name = user.name || "Operations team"; const initials = name.split(/\s+/).slice(0,2).map(p=>p[0]).join("").toUpperCase(); $("#user-name").textContent = name; $("#user-role").textContent = `${user.role_label || user.role}${user.station ? ` · ${user.station}` : ""}`; $("#user-avatar").textContent = initials; $("#top-avatar").textContent = initials; $("#greeting-name").textContent = name.split(" ")[0]; $("#station-label").textContent = user.station || "All stations"; if(user.is_superadmin){$$("[data-superadmin]").forEach(n=>n.hidden=false)} if(user.is_superadmin||permissions.includes("users.view")) $$("[data-user-admin]").forEach(n=>n.hidden=false); };
+  const loadDashboard = async () => {
+    const data = await api("/api/dashboard/");
+    $("#stat-total").textContent = data.total; $("#stat-transit").textContent = data.in_transit; $("#stat-pickup").textContent = data.awaiting_pickup; $("#stat-exceptions").textContent = data.exceptions;
+    $("#parcel-nav-count").textContent = data.total; $("#exception-dot").classList.toggle("show", data.exceptions > 0);
+    const sc = data.status_counts || {}, donutValues = [sc.on_trip || 0, (sc.received || 0) + (sc.pickup || 0), (sc.registered || 0) + (sc.ready || 0) + (sc.out_for_delivery || 0), (sc.collected || 0) + (sc.delivered || 0)];
+    $("#donut-total").textContent = data.total; $("#legend-transit").textContent = donutValues[0]; $("#legend-received").textContent = donutValues[1]; $("#legend-ready").textContent = donutValues[2]; $("#legend-done").textContent = donutValues[3];
+    const chartCounts = [data.status_counts?.registered || 0, data.status_counts?.ready || 0, data.status_counts?.on_trip || 0, data.status_counts?.received || 0, (data.status_counts?.pickup || 0) + (data.status_counts?.out_for_delivery || 0) + (data.status_counts?.collected || 0) + (data.status_counts?.delivered || 0)];
+    const chartLabels = ["Registered", "Dispatch", "In transit", "Received", "Completed"], chartMax = Math.max(1, ...chartCounts);
+    $(".chart-bars").innerHTML = `<div class="grid-line"></div><div class="grid-line"></div><div class="grid-line"></div><div class="grid-line"></div>${chartCounts.map((count,i)=>`<div class="bar-set"><i style="--h:${Math.max(2, count/chartMax*88)}%" title="${count} parcels"></i><small>${chartLabels[i]}</small></div>`).join("")}`;
+    $(".chart-legend").innerHTML = `<span><i class="legend-dot"></i> Parcel count</span>`;
+    const donutTotal = Math.max(1, donutValues.reduce((a,b)=>a+b,0)), t1=donutValues[0]/donutTotal*100, t2=t1+donutValues[1]/donutTotal*100, t3=t2+donutValues[2]/donutTotal*100;
+    $("#status-donut").style.background = `conic-gradient(var(--yellow) 0 ${t1}%,#64a77b ${t1}% ${t2}%,#7e9fd0 ${t2}% ${t3}%,#d9dad4 ${t3}% 100%)`;
+    state.stations = data.stations || []; state.parcels = data.recent_parcels || [];
+    listRows(state.parcels.slice(0,7), "#recent-parcels", "No parcels yet. Register the first one to get started.", recentRow, 6);
+  };
+  const loadParcels = async () => {
+    const params = new URLSearchParams(); const q = $("#parcel-search").value.trim(), status = $("#parcel-filter").value;
+    if (q) params.set("q", q); if (status) params.set("status", status);
+    state.parcels = await api(`/api/parcels/?${params}`); listRows(state.parcels, "#parcel-table", "No matching parcels found.", parcelRow, 7);
+  };
+  const loadTrips = async () => {
+    state.trips = await api("/api/trips/");
+    const permissions=state.user?.permissions||[], canManage=state.user?.is_superadmin||permissions.includes("trips.manage"), canArrive=state.user?.is_superadmin||permissions.includes("receiving.scan");
+    $("#trip-list").innerHTML = state.trips.length ? state.trips.map(t => `<article class="panel trip-card"><div class="trip-card-head"><div><div class="eyebrow">MANIFEST</div><div class="trip-card-id">${escapeHtml(t.trip_id)}</div></div><span class="status-pill ${t.status === "in_transit" ? "yellow" : t.status === "arrived" ? "green" : "blue"}">${escapeHtml(t.status.replaceAll("_"," "))}</span></div><div class="trip-route"><b>${escapeHtml(t.origin_name)}</b><span class="route-arrow">→</span><b>${escapeHtml(t.destination_name)}</b></div><div class="trip-meta"><span>▤ &nbsp;${t.parcel_count} parcels</span><span>◷ &nbsp;${t.departed_at ? `Departed ${time(t.departed_at)}` : `Created ${date(t.created_at)}`}</span>${t.driver_name ? `<span>Driver: ${escapeHtml(t.driver_name)}</span>` : ""}</div><div class="trip-actions">${t.status === "preparing" && canManage ? `<button class="button button-light" data-trip-add="${escapeHtml(t.trip_id)}">＋ Add parcel</button><button class="button button-primary" data-trip-dispatch="${escapeHtml(t.trip_id)}">Dispatch trip →</button>` : ""}${t.status === "in_transit" && canArrive ? `<button class="button button-primary" data-trip-arrive="${escapeHtml(t.trip_id)}">Mark arrived →</button>` : ""}</div></article>`).join("") : `<div class="empty-state"><span>⇄</span><b>No trips yet</b><p>Create a trip to start a new parcel manifest.</p></div>`;
+  };
+  const loadExceptions = async () => {
+    const items = await api("/api/exceptions/?open=true"); $("#open-exception-count").textContent = `${items.length} OPEN`;
+    const canResolve=state.user?.is_superadmin||state.user?.permissions?.includes("exceptions.resolve");
+    $("#exception-table").innerHTML = items.length ? items.map(e => `<tr><td><b>${escapeHtml(e.parcel_id)}</b></td><td>${escapeHtml(e.kind_label)}</td><td>${escapeHtml(e.note)}</td><td>${escapeHtml(e.created_by_name)}</td><td>${date(e.created_at)}</td><td>${canResolve?`<button class="button button-light" data-resolve="${e.id}">Resolve</button>`:""}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-cell">No open exceptions. Your parcels are looking good.</td></tr>`;
+  };
+  const loadView = async view => {
+    try { if (view === "dashboard") await loadDashboard(); if (view === "parcels") await loadParcels(); if (view === "trips") await loadTrips(); if (view === "exceptions") await loadExceptions(); }
+    catch (error) { toast(error.message, true); }
+  };
+  const navigate = view => {
+    if (!$("#view-"+view)) view = "dashboard"; state.view = view;
+    $$(".view").forEach(x => x.classList.toggle("active", x.id === "view-"+view));
+    $$(".nav-link[data-view]").forEach(x => x.classList.toggle("active", x.dataset.view === view));
+    const labels = {dashboard:"Overview",parcels:"Parcels",trips:"Trips",receiving:"Receiving",exceptions:"Exceptions",reports:"Reports",pricing:"Category charges",users:"User management",drivers:"Drivers",roles:"Roles & permissions"};
+    $("#breadcrumb-current").textContent = labels[view]; history.replaceState(null,"",`#${view}`); $("#sidebar").classList.remove("open"); loadView(view);
+  };
+  const options = selected => `<option value="">Select a station</option>${state.stations.map(s => `<option value="${s.id}" ${String(selected)===String(s.id)?"selected":""}>${escapeHtml(s.name)} · ${escapeHtml(s.code)}</option>`).join("")}`;
+  const showModal = (title, kicker, body) => { $("#modal-title").textContent = title; $("#modal-kicker").textContent = kicker; $("#modal-body").innerHTML = body; $("#modal-overlay").classList.add("open"); $("#modal-overlay").setAttribute("aria-hidden","false"); };
+  const closeModal = () => { $("#modal-overlay").classList.remove("open"); $("#modal-overlay").setAttribute("aria-hidden","true"); };
+  const newParcel = async () => {
+    if (!state.stations.length) { await loadDashboard(); }
+    if (!state.stations.length) { showModal("Set up your stations", "GETTING STARTED", `<p class="form-intro">Add at least two active stations before registering parcels or building a trip manifest.</p><div class="modal-actions"><button type="button" class="button button-light close-modal">Close</button>${state.user?.role === "Administrator" ? `<a class="button button-primary" href="/admin/operations/station/add/">Add station →</a>` : ""}</div>`); return; }
+    showModal("Register a parcel", "NEW PARCEL", `<form id="new-parcel-form"><div class="form-grid"><div class="field"><label>Sender name</label><input name="sender_name" required maxlength="120" placeholder="Full name"></div><div class="field"><label>Sender phone</label><input name="sender_phone" required maxlength="24" placeholder="+234 800 000 0000"></div><div class="field"><label>Receiver name</label><input name="receiver_name" required maxlength="120" placeholder="Full name"></div><div class="field"><label>Receiver phone</label><input name="receiver_phone" required maxlength="24" placeholder="+234 800 000 0000"></div><div class="field"><label>Origin station</label><select name="origin" required>${options(state.stations.find(s=>s.name===state.user?.station)?.id)}</select></div><div class="field"><label>Destination station</label><select name="destination" required>${options()}</select></div><div class="field full"><label>Item description</label><input name="description" required maxlength="180" placeholder="e.g. Box of household items"></div><div class="field"><label>Service type</label><select name="service_type"><option value="standard">Standard</option><option value="express">Express</option></select></div><div class="field"><label>Declared value (₦)</label><input name="declared_value" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>Delivery method</label><select name="delivery_method"><option value="pickup">Station pickup</option><option value="door">Doorstep delivery</option></select></div><div class="field"><label>Delivery address <span style="font-weight:400;color:#999">(for doorstep)</span></label><input name="delivery_address" maxlength="240" placeholder="Street, city"></div><div class="field"><label>Weight (kg)</label><input name="weight_kg" type="number" step="0.01" min="0" value="0"></div><div class="field"><label>Quantity</label><input name="quantity" type="number" min="1" value="1"></div><div class="field"><label>Delivery charge (₦)</label><input name="charge" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>Payment method</label><select name="payment_method"><option>cash</option><option>transfer</option><option>pos</option><option>account</option></select></div><div class="field"><label>Payment reference</label><input name="payment_reference" maxlength="80" placeholder="Optional reference"></div><div class="field full"><label class="form-row"><input type="checkbox" name="is_paid"> Payment received</label></div><div class="field full" id="parcel-error"></div></div><div class="modal-actions"><button type="button" class="button button-light close-modal">Cancel</button><button class="button button-primary">Create parcel <span>→</span></button></div></form>`);
+  };
+  const newTrip = async () => {
+    if (!state.stations.length) await loadDashboard();
+    if (!state.stations.length) { await newParcel(); return; }
+    showModal("Create a trip", "NEW MANIFEST", `<form id="new-trip-form"><div class="form-grid"><div class="field"><label>Origin station</label><select name="origin" required>${options()}</select></div><div class="field"><label>Destination station</label><select name="destination" required>${options()}</select></div><div class="field"><label>Driver name</label><input name="driver_name" maxlength="120" placeholder="Assigned driver"></div><div class="field"><label>Vehicle</label><input name="vehicle" maxlength="40" placeholder="Registration number"></div></div><div class="modal-actions"><button type="button" class="button button-light close-modal">Cancel</button><button class="button button-primary">Create manifest <span>→</span></button></div></form>`);
+  };
+  const showParcel = async id => {
+    try {
+      const p = await api(`/api/parcels/${encodeURIComponent(id)}/`);
+      const events = (p.events || []).map(e => `<div class="timeline-item"><i></i><div><b>${escapeHtml(e.status_label)}</b><small>${escapeHtml(e.note || "Status updated")} · ${escapeHtml(e.actor)} · ${date(e.created_at)} ${time(e.created_at)}</small></div></div>`).join("");
+      const actions = p.status === "received" && p.delivery_method === "pickup" ? `<button class="button button-primary" data-ready-handover="${escapeHtml(p.parcel_id)}">Ready for pickup →</button>` : "";
+      const assign = p.status === "received" && p.delivery_method === "door" ? `<button class="button button-primary" data-assign-courier="${escapeHtml(p.parcel_id)}">Assign courier →</button>` : "";
+      showModal(p.parcel_id, "PARCEL DETAILS", `<div class="parcel-detail"><div class="detail-top"><div><h3>${escapeHtml(p.receiver_name)}</h3><p>${escapeHtml(p.description)} · ${escapeHtml(p.quantity)} item(s)</p></div>${statusPill(p)}</div><div class="detail-grid"><span>Route</span><b>${escapeHtml(p.origin_name)} → ${escapeHtml(p.destination_name)}</b><span>Sender</span><b>${escapeHtml(p.sender_name)} · ${escapeHtml(p.sender_phone)}</b><span>Receiver</span><b>${escapeHtml(p.receiver_name)} · ${escapeHtml(p.receiver_phone)}</b><span>Charge</span><b>${money(p.charge)} · ${p.is_paid ? "Paid" : "Unpaid"} (${escapeHtml(p.payment_method)}${p.payment_reference ? ` · ${escapeHtml(p.payment_reference)}` : ""})</b><span>Handover PIN</span><b class="pin-value">${escapeHtml(p.handover_pin)}</b>${p.courier_name ? `<span>Assigned courier</span><b>${escapeHtml(p.courier_name)}</b>` : ""}</div><h4>Parcel timeline</h4><div class="timeline">${events || "<small>No events recorded yet.</small>"}</div><div class="modal-actions"><a class="button button-light" href="/parcels/${encodeURIComponent(p.parcel_id)}/label/" target="_blank">Print label ↗</a>${actions}${assign}<button class="button button-light" data-handover="${escapeHtml(p.parcel_id)}">Verify handover</button><button class="button button-light close-modal">Close</button></div></div>`);
+    } catch (error) { toast(error.message, true); }
+  };
+  const submit = async (url, data, method = "POST") => api(url, {method, body:JSON.stringify(data)});
+  document.addEventListener("click", async event => {
+    const nav = event.target.closest("[data-view]"); if (nav) { event.preventDefault(); navigate(nav.dataset.view); return; }
+    if (event.target.closest("[data-action='new-parcel']")) { try { await newParcel(); } catch(e){toast(e.message,true)} return; }
+    if (event.target.closest("[data-action='new-trip']")) { try { await newTrip(); } catch(e){toast(e.message,true)} return; }
+    if (event.target.closest(".close-modal")) { closeModal(); return; }
+    if (event.target === $("#modal-overlay")) { closeModal(); return; }
+    const more = event.target.closest("[data-parcel]"); if (more) { showParcel(more.dataset.parcel); return; }
+    const add = event.target.closest("[data-trip-add]"); if (add) { const id=prompt("Enter or scan a parcel ID to add to the manifest:"); if(id) try{await submit(`/api/trips/${add.dataset.tripAdd}/parcels/`,{parcel_id:id.trim()});toast("Parcel added to manifest.");loadTrips();}catch(e){toast(e.message,true)} return; }
+    const dispatch = event.target.closest("[data-trip-dispatch]"); if (dispatch) try{await submit(`/api/trips/${dispatch.dataset.tripDispatch}/dispatch/`,{});toast("Trip dispatched.");loadTrips();}catch(e){toast(e.message,true)}
+    const arrive = event.target.closest("[data-trip-arrive]"); if (arrive) try{await submit(`/api/trips/${arrive.dataset.tripArrive}/arrive/`,{});toast("Trip marked as arrived.");loadTrips();}catch(e){toast(e.message,true)}
+    const resolve = event.target.closest("[data-resolve]"); if (resolve) { const resolution=prompt("Add a short resolution note:"); if(resolution)try{await submit(`/api/exceptions/${resolve.dataset.resolve}/resolve/`,{resolution});toast("Exception resolved.");loadExceptions();}catch(e){toast(e.message,true)} return; }
+    const ready = event.target.closest("[data-ready-handover]"); if (ready) try{await submit(`/api/parcels/${ready.dataset.readyHandover}/ready-handover/`,{});toast("Parcel moved to final handover.");closeModal();loadView(state.view);}catch(e){toast(e.message,true)}
+    const assign = event.target.closest("[data-assign-courier]"); if (assign) { const username=prompt("Enter the username of a courier assigned to the destination station:"); if(username)try{await submit(`/api/parcels/${assign.dataset.assignCourier}/assign-courier/`,{username});toast("Courier assigned. Parcel is now out for delivery.");closeModal();loadView(state.view);}catch(e){toast(e.message,true)} return; }
+    const handover = event.target.closest("[data-handover]"); if (handover) { const recipient_name=prompt("Recipient full name:"); if(!recipient_name)return; const pin=prompt("Enter the 6-digit handover PIN:"); if(pin)try{await submit(`/api/parcels/${handover.dataset.handover}/handover/`,{recipient_name,pin});toast("Handover recorded and PIN verified.");closeModal();loadView(state.view);}catch(e){toast(e.message,true)} }
+    if(event.target.closest("#global-search")){navigate("parcels");setTimeout(()=>$("#parcel-search")?.focus(),50)}
+  });
+  document.addEventListener("submit", async event => {
+    if(event.target.id === "new-parcel-form") { event.preventDefault(); const f=new FormData(event.target), data=Object.fromEntries(f.entries()); ["origin","destination","quantity","weight_kg","charge","declared_value"].forEach(k=>data[k]=Number(data[k])); data.is_paid=f.has("is_paid");
+      try{const p=await submit("/api/parcels/",data);toast(`Parcel ${p.parcel_id} registered. PIN ${p.handover_pin}`);closeModal();if(state.view==="dashboard")loadDashboard();if(state.view==="parcels")loadParcels();}catch(e){$("#parcel-error").innerHTML=`<div class="form-error">${escapeHtml(e.message)}</div>`;} }
+    if(event.target.id === "new-trip-form"){event.preventDefault();const data=Object.fromEntries(new FormData(event.target).entries());data.origin=Number(data.origin);data.destination=Number(data.destination);try{const t=await submit("/api/trips/",data);toast(`Trip ${t.trip_id} created. Add parcels to its manifest.`);closeModal();navigate("trips");}catch(e){toast(e.message,true)}}
+    if(event.target.id === "receive-form"){event.preventDefault();const id=$("#receive-id").value.trim(),kind=$("#receive-kind").value,note=$("#receive-note").value.trim(),payload={parcel_id:id};if(kind)payload.kind=kind;if(note)payload.note=note;try{const p=await submit("/api/receiving/scan/",payload);$("#receive-result").innerHTML=`<div class="result-card"><div><b>${escapeHtml(p.parcel_id)} · ${escapeHtml(p.receiver_name)}</b><small>${escapeHtml(p.origin_name)} → ${escapeHtml(p.destination_name)} · ${escapeHtml(p.status_label)}${kind?` · Exception flagged`:""}</small></div><span class="status-pill green">Received</span></div>`;$("#receive-id").value="";$("#receive-note").value="";$("#receive-kind").value="";toast(kind?"Arrival recorded and exception flagged.":"Arrival scan recorded.");}catch(e){$("#receive-result").innerHTML=`<div class="form-error">${escapeHtml(e.message)}</div>`}}
+  });
+  let searchTimer; $("#parcel-search")?.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadParcels,220)}); $("#parcel-filter")?.addEventListener("change",loadParcels);
+  $("#menu-toggle")?.addEventListener("click",()=>$("#sidebar").classList.toggle("open"));
+  document.addEventListener("keydown",event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==="k"){event.preventDefault();navigate("parcels");setTimeout(()=>$("#parcel-search")?.focus(),50)}if(event.key==="Escape")closeModal()});
+  const now=new Date(); $("#today-label").textContent=now.toLocaleDateString("en-NG",{weekday:"short",day:"numeric",month:"short"}); $("#today-long").textContent=now.toLocaleDateString("en-NG",{weekday:"short",day:"numeric",month:"short"}).toUpperCase();
+  api("/api/auth/csrf/").then(()=>Promise.all([loadMe(),loadDashboard()])).catch(error=>{if(error.message.includes("401"))location.href="/login/";else toast(error.message,true)});
+  const initial=location.hash.replace("#","");if(initial&&$("#view-"+initial))navigate(initial);
+})();
