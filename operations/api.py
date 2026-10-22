@@ -682,6 +682,8 @@ def parcel_receipt(request, parcel_id):
     denied = permission_denied(request.user, "parcels.receipt")
     if denied:
         return denied
+    code = barcode.get("code128", parcel_id, writer=SVGWriter())
+    barcode_svg = code.render({"write_text": False, "module_width": 0.22, "module_height": 13, "quiet_zone": 2.5}).decode("utf-8")
     with transaction.atomic():
         parcel = visible_parcels(request.user).select_for_update().select_related("origin", "destination", "item_category").filter(parcel_id=parcel_id).first()
         if not parcel:
@@ -696,9 +698,7 @@ def parcel_receipt(request, parcel_id):
         parcel.last_receipt_printed_at = now
         parcel.last_receipt_printed_by = request.user
         parcel.save(update_fields=["receipt_print_count", "first_receipt_printed_at", "last_receipt_printed_at", "last_receipt_printed_by", "updated_at"])
-    code = barcode.get("code128", parcel.parcel_id, writer=SVGWriter())
-    barcode_svg = code.render({"write_text": False, "module_width": 0.22, "module_height": 13, "quiet_zone": 2.5}).decode("utf-8")
-    html = render_to_string("operations/receipt.html", {"parcel": parcel, "barcode_svg": barcode_svg, "printed_by": request.user.get_full_name() or request.user.username, "reprint": reprint})
+        html = render_to_string("operations/receipt.html", {"parcel": parcel, "barcode_svg": barcode_svg, "printed_by": request.user.get_full_name() or request.user.username, "reprint": reprint})
     return Response({"html": html, "receipt_print_count": parcel.receipt_print_count, "is_reprint": reprint})
 
 
