@@ -46,6 +46,14 @@
     state.stations = data.stations || []; state.parcels = data.recent_parcels || [];
     listRows(state.parcels.slice(0,7), "#recent-parcels", "No parcels yet. Register the first one to get started.", recentRow, 6);
   };
+  const loadStations = async () => {
+    state.stations = await api("/api/stations/");
+    $("#station-count").textContent = `${state.stations.length} STATION${state.stations.length === 1 ? "" : "S"}`;
+    $("#station-table").innerHTML = state.stations.length ? state.stations.map(station => `<tr><td><b>${escapeHtml(station.name)}</b></td><td><span class="status-pill yellow">${escapeHtml(station.code)}</span></td><td>${escapeHtml(station.address || "—")}</td><td><span class="status-pill green">Active</span></td></tr>`).join("") : `<tr><td colspan="4" class="empty-cell">No stations yet. Create the first station to start setting up parcel routes.</td></tr>`;
+  };
+  const newStation = () => {
+    showModal("Create a station", "NETWORK SETUP", `<p class="form-intro">Add a branch or operating location. Its short code will identify it in station lists and parcel routes.</p><form id="new-station-form"><div class="form-grid"><div class="field"><label>Station name</label><input name="name" required maxlength="100" autocomplete="organization" placeholder="e.g. Ikeja Station"></div><div class="field"><label>Station code</label><input name="code" required maxlength="12" pattern="[A-Za-z0-9-]+" autocapitalize="characters" placeholder="e.g. IKEJA"></div><div class="field full"><label>Address <span style="font-weight:400;color:#999">(optional)</span></label><input name="address" maxlength="240" autocomplete="street-address" placeholder="Street, area, city"></div><div class="field full" id="station-error"></div></div><div class="modal-actions"><button type="button" class="button button-light close-modal">Cancel</button><button class="button button-primary">Create station <span>→</span></button></div></form>`);
+  };
   const loadParcels = async () => {
     const params = new URLSearchParams(); const q = $("#parcel-search").value.trim(), status = $("#parcel-filter").value;
     if (q) params.set("q", q); if (status) params.set("status", status);
@@ -62,14 +70,14 @@
     $("#exception-table").innerHTML = items.length ? items.map(e => `<tr><td><b>${escapeHtml(e.parcel_id)}</b></td><td>${escapeHtml(e.kind_label)}</td><td>${escapeHtml(e.note)}</td><td>${escapeHtml(e.created_by_name)}</td><td>${date(e.created_at)}</td><td>${canResolve?`<button class="button button-light" data-resolve="${e.id}">Resolve</button>`:""}</td></tr>`).join("") : `<tr><td colspan="6" class="empty-cell">No open exceptions. Your parcels are looking good.</td></tr>`;
   };
   const loadView = async view => {
-    try { if (view === "dashboard") await loadDashboard(); if (view === "parcels") await loadParcels(); if (view === "trips") await loadTrips(); if (view === "exceptions") await loadExceptions(); }
+    try { if (view === "dashboard") await loadDashboard(); if (view === "parcels") await loadParcels(); if (view === "trips") await loadTrips(); if (view === "exceptions") await loadExceptions(); if (view === "stations") await loadStations(); }
     catch (error) { toast(error.message, true); }
   };
   const navigate = view => {
     if (!$("#view-"+view)) view = "dashboard"; state.view = view;
     $$(".view").forEach(x => x.classList.toggle("active", x.id === "view-"+view));
     $$(".nav-link[data-view]").forEach(x => x.classList.toggle("active", x.dataset.view === view));
-    const labels = {dashboard:"Overview",parcels:"Parcels",trips:"Trips",receiving:"Receiving",exceptions:"Exceptions",reports:"Reports",pricing:"Category charges",users:"User management",drivers:"Drivers",roles:"Roles & permissions"};
+    const labels = {dashboard:"Overview",parcels:"Parcels",trips:"Trips",receiving:"Receiving",exceptions:"Exceptions",reports:"Reports",pricing:"Category charges",users:"User management",drivers:"Drivers",roles:"Roles & permissions",stations:"Stations"};
     $("#breadcrumb-current").textContent = labels[view]; history.replaceState(null,"",`#${view}`); $("#sidebar").classList.remove("open"); loadView(view);
   };
   const options = selected => `<option value="">Select a station</option>${state.stations.map(s => `<option value="${s.id}" ${String(selected)===String(s.id)?"selected":""}>${escapeHtml(s.name)} · ${escapeHtml(s.code)}</option>`).join("")}`;
@@ -99,6 +107,7 @@
     const nav = event.target.closest("[data-view]"); if (nav) { event.preventDefault(); navigate(nav.dataset.view); return; }
     if (event.target.closest("[data-action='new-parcel']")) { try { await newParcel(); } catch(e){toast(e.message,true)} return; }
     if (event.target.closest("[data-action='new-trip']")) { try { await newTrip(); } catch(e){toast(e.message,true)} return; }
+    if (event.target.closest("[data-action='new-station']")) { newStation(); return; }
     if (event.target.closest(".close-modal")) { closeModal(); return; }
     if (event.target === $("#modal-overlay")) { closeModal(); return; }
     const more = event.target.closest("[data-parcel]"); if (more) { showParcel(more.dataset.parcel); return; }
@@ -115,6 +124,7 @@
     if(event.target.id === "new-parcel-form") { event.preventDefault(); const f=new FormData(event.target), data=Object.fromEntries(f.entries()); ["origin","destination","quantity","weight_kg","charge","declared_value"].forEach(k=>data[k]=Number(data[k])); data.is_paid=f.has("is_paid");
       try{const p=await submit("/api/parcels/",data);toast(`Parcel ${p.parcel_id} registered. PIN ${p.handover_pin}`);closeModal();if(state.view==="dashboard")loadDashboard();if(state.view==="parcels")loadParcels();}catch(e){$("#parcel-error").innerHTML=`<div class="form-error">${escapeHtml(e.message)}</div>`;} }
     if(event.target.id === "new-trip-form"){event.preventDefault();const data=Object.fromEntries(new FormData(event.target).entries());data.origin=Number(data.origin);data.destination=Number(data.destination);try{const t=await submit("/api/trips/",data);toast(`Trip ${t.trip_id} created. Add parcels to its manifest.`);closeModal();navigate("trips");}catch(e){toast(e.message,true)}}
+    if(event.target.id === "new-station-form"){event.preventDefault();const data=Object.fromEntries(new FormData(event.target).entries());data.name=data.name.trim();data.code=data.code.trim().toUpperCase();data.address=data.address.trim();try{const station=await submit("/api/stations/",data);toast(`${station.name} station created.`);closeModal();await loadStations();}catch(e){$("#station-error").innerHTML=`<div class="form-error">${escapeHtml(e.message)}</div>`;}}
     if(event.target.id === "receive-form"){event.preventDefault();const id=$("#receive-id").value.trim(),kind=$("#receive-kind").value,note=$("#receive-note").value.trim(),payload={parcel_id:id};if(kind)payload.kind=kind;if(note)payload.note=note;try{const p=await submit("/api/receiving/scan/",payload);$("#receive-result").innerHTML=`<div class="result-card"><div><b>${escapeHtml(p.parcel_id)} · ${escapeHtml(p.receiver_name)}</b><small>${escapeHtml(p.origin_name)} → ${escapeHtml(p.destination_name)} · ${escapeHtml(p.status_label)}${kind?` · Exception flagged`:""}</small></div><span class="status-pill green">Received</span></div>`;$("#receive-id").value="";$("#receive-note").value="";$("#receive-kind").value="";toast(kind?"Arrival recorded and exception flagged.":"Arrival scan recorded.");}catch(e){$("#receive-result").innerHTML=`<div class="form-error">${escapeHtml(e.message)}</div>`}}
   });
   let searchTimer; $("#parcel-search")?.addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(loadParcels,220)}); $("#parcel-filter")?.addEventListener("change",loadParcels);

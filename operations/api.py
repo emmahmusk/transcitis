@@ -25,7 +25,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from .models import Invitation, ItemCategory, OperationalException, Parcel, ParcelEvent, ReceiptPrint, RolePermission, StaffProfile, Station, Trip
 from .permissions import DEFAULT_ROLE_PERMISSIONS, PERMISSION_CATALOG
-from .serializers import DriverCreateSerializer, DriverSerializer, ExceptionSerializer, InviteAcceptSerializer, ItemCategorySerializer, ParcelSerializer, RolePermissionUpdateSerializer, StaffInviteSerializer, StaffUpdateSerializer, StationSerializer, TripSerializer
+from .serializers import DriverCreateSerializer, DriverSerializer, ExceptionSerializer, InviteAcceptSerializer, ItemCategorySerializer, ParcelSerializer, RolePermissionUpdateSerializer, StaffInviteSerializer, StaffUpdateSerializer, StationCreateSerializer, StationSerializer, TripSerializer
 
 
 def staff_role(user):
@@ -549,13 +549,27 @@ def item_category_export(request):
     return response
 
 
-@extend_schema(tags=["Stations"], responses={200: StationSerializer(many=True)})
-@api_view(["GET"])
+@extend_schema(
+    tags=["Stations"],
+    summary="List stations or create a station",
+    description="Lists active stations for users with station-view access. Only the super administrator can create a station. Station codes are normalized to uppercase and must be unique.",
+    request=StationCreateSerializer,
+    responses={200: StationSerializer(many=True), 201: StationSerializer, 400: OpenApiTypes.OBJECT, 403: OpenApiTypes.OBJECT},
+)
+@api_view(["GET", "POST"])
 def station_list(request):
-    denied = permission_denied(request.user, "stations.view")
-    if denied:
-        return denied
-    return Response(StationSerializer(Station.objects.filter(is_active=True), many=True).data)
+    if request.method == "GET":
+        denied = permission_denied(request.user, "stations.view")
+        if denied:
+            return denied
+        return Response(StationSerializer(Station.objects.filter(is_active=True), many=True).data)
+
+    if not request.user.is_superuser:
+        return Response({"detail": "Only the super administrator can create stations."}, status=403)
+    serializer = StationCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    station = serializer.save()
+    return Response(StationSerializer(station).data, status=201)
 
 
 @extend_schema(tags=["Overview"], responses={200: OpenApiTypes.OBJECT})

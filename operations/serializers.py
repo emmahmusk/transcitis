@@ -9,6 +9,20 @@ class StationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Station
         fields = ["id", "name", "code", "address"]
+        read_only_fields = ["id"]
+
+
+class StationCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Station
+        fields = ["id", "name", "code", "address"]
+        read_only_fields = ["id"]
+
+    def validate_code(self, value):
+        code = value.strip().upper()
+        if not code or not all(ch.isalnum() or ch == "-" for ch in code):
+            raise serializers.ValidationError("Use letters, numbers or hyphens in the station code.")
+        return code
 
 
 class StaffSerializer(serializers.Serializer):

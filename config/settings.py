@@ -30,10 +30,20 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [{"BACKEND": "django.template.backends.django.DjangoTemplates", "DIRS": [BASE_DIR / "templates"], "APP_DIRS": True, "OPTIONS": {"context_processors": ["django.template.context_processors.request", "django.contrib.auth.context_processors.auth", "django.contrib.messages.context_processors.messages"]}}]
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
-if os.getenv("DATABASE_URL"):
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DEBUG:
+    # Keep developer work isolated from the hosted database, even when DATABASE_URL is present.
+    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+else:
+    if not DATABASE_URL:
+        raise RuntimeError("Set DATABASE_URL to the production PostgreSQL connection string when DEBUG=False.")
+    if "[YOUR-PASSWORD]" in DATABASE_URL or "<" in DATABASE_URL or ">" in DATABASE_URL:
+        raise RuntimeError("Replace the DATABASE_URL password placeholder with the real database password before starting with DEBUG=False.")
+
     import dj_database_url
-    DATABASES["default"] = dj_database_url.parse(os.environ["DATABASE_URL"], conn_max_age=60)
+    DATABASES = {"default": dj_database_url.parse(DATABASE_URL, conn_max_age=0, ssl_require=True)}
+    # Supabase's shared pooler on port 6543 runs in transaction mode and does not support prepared statements.
+    DATABASES["default"].setdefault("OPTIONS", {})["prepare_threshold"] = None
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
