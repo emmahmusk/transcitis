@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Count, Q
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.template.loader import render_to_string
 from django.utils import timezone
@@ -570,6 +571,44 @@ def station_list(request):
     serializer.is_valid(raise_exception=True)
     station = serializer.save()
     return Response(StationSerializer(station).data, status=201)
+
+
+@extend_schema(
+    tags=["Stations"],
+    summary="Update or delete a station",
+    description="Only the super administrator can update or delete a station. Deletion is blocked while the station is referenced by staff, parcels, trips, or parcel history.",
+    request=StationCreateSerializer,
+    responses={200: StationSerializer, 204: None, 400: OpenApiTypes.OBJECT, 403: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT, 409: OpenApiTypes.OBJECT},
+)
+@api_view(["PATCH", "DELETE"])
+def station_detail(request, station_id):
+    if not request.user.is_superuser:
+        return Response({"detail": "Only the super administrator can edit or delete stations."}, status=403)
+    try:
+        station = Station.objects.get(pk=station_id)
+    except Station.DoesNotExist:
+        return Response({"detail": "Station not found."}, status=404)
+
+    if request.method == "PATCH":
+        serializer = StationCreateSerializer(station, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        station = serializer.save()
+        return Response(StationSerializer(station).data)
+
+    references = {
+        "staff": station.staff.count(),
+        "parcels": station.outbound_parcels.count() + station.inbound_parcels.count(),
+        "trips": station.departing_trips.count() + station.arriving_trips.count(),
+        "parcel history records": station.parcelevent_set.count(),
+    }
+    used_by = [f"{count} {label}" for label, count in references.items() if count]
+    if used_by:
+        return Response({"detail": f"This station is in use and cannot be deleted: {', '.join(used_by)}. Reassign or resolve these records first."}, status=409)
+    try:
+        station.delete()
+    except ProtectedError:
+        return Response({"detail": "This station is in use and cannot be deleted. Resolve its linked records first."}, status=409)
+    return Response(status=204)
 
 
 @extend_schema(tags=["Overview"], responses={200: OpenApiTypes.OBJECT})

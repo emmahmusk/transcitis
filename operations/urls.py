@@ -17,6 +17,7 @@ urlpatterns = [
     path("item-categories/export/", api.item_category_export, name="api-item-category-export"),
     path("item-categories/<int:category_id>/", api.item_category_update, name="api-item-category-update"),
     path("stations/", api.station_list, name="api-stations"),
+    path("stations/<int:station_id>/", api.station_detail, name="api-station-detail"),
     path("dashboard/", api.dashboard, name="api-dashboard"),
     path("parcels/", api.parcel_list, name="api-parcels"),
     path("parcels/export/", api.parcel_export, name="api-parcel-export"),
