@@ -16,17 +16,27 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import SimpleRateThrottle
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from .models import Invitation, ItemCategory, OperationalException, Parcel, ParcelEvent, ReceiptPrint, RolePermission, StaffProfile, Station, Trip
+from .models import Invitation, ItemCategory, OperationalException, Parcel, ParcelEvent, ParcelPricingRule, ParcelPricingSettings, ReceiptPrint, RolePermission, StaffProfile, Station, Trip
 from .permissions import DEFAULT_ROLE_PERMISSIONS, PERMISSION_CATALOG
-from .serializers import DriverCreateSerializer, DriverSerializer, ExceptionSerializer, InviteAcceptSerializer, ItemCategorySerializer, ParcelSerializer, RolePermissionUpdateSerializer, StaffInviteSerializer, StaffUpdateSerializer, StationCreateSerializer, StationSerializer, TripSerializer
+from .pricing import calculate_parcel_charge, lookup_market_value
+from .serializers import DriverCreateSerializer, DriverSerializer, ExceptionSerializer, InviteAcceptSerializer, ItemCategorySerializer, ParcelPriceEstimateSerializer, ParcelPricingRuleSerializer, ParcelPricingSettingsSerializer, ParcelSerializer, RolePermissionUpdateSerializer, StaffInviteSerializer, StaffUpdateSerializer, StationCreateSerializer, StationSerializer, TripSerializer
+
+
+class PricingEstimateThrottle(SimpleRateThrottle):
+    scope = "pricing-estimate"
+
+    def get_cache_key(self, request, view):
+        ident = f"user-{request.user.pk}" if request.user.is_authenticated else self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
 def staff_role(user):
@@ -170,6 +180,9 @@ def issue_staff_tokens(user):
 class ParcelCreateSerializer(serializers.ModelSerializer):
     quantity = serializers.IntegerField(min_value=1, max_value=32767, default=1)
     weight_kg = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, default=0)
+    length_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
+    width_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
+    height_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
     declared_value = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0, default=0)
     charge = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, read_only=True)
     is_paid = serializers.BooleanField(read_only=True)
@@ -184,15 +197,29 @@ class ParcelCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"destination": "Origin and destination must be different stations."})
         if attrs.get("delivery_method") == Parcel.DeliveryMethod.DOOR and not attrs.get("delivery_address", "").strip():
             raise serializers.ValidationError({"delivery_address": "Enter a delivery address for doorstep delivery."})
+        dimensions = [attrs.get("length_cm"), attrs.get("width_cm"), attrs.get("height_cm")]
+        if any(value is not None for value in dimensions) and not all(value is not None for value in dimensions):
+            raise serializers.ValidationError("Enter all three parcel dimensions to use volumetric weight.")
         category = attrs.get("item_category")
-        if not category or not category.is_active or category.charge is None:
-            raise serializers.ValidationError({"item_category": "Choose a category with an approved charge."})
-        if attrs.get("amount_paid", 0) > category.charge:
+        if not category or not category.is_active:
+            raise serializers.ValidationError({"item_category": "Choose an active item category."})
+        quote = calculate_parcel_charge(
+            origin=attrs.get("origin"), destination=attrs.get("destination"), category=category,
+            service_type=attrs.get("service_type", Parcel.ServiceType.STANDARD),
+            weight_kg=attrs.get("weight_kg", 0), quantity=attrs.get("quantity", 1),
+            declared_value=attrs.get("declared_value", 0),
+            delivery_method=attrs.get("delivery_method", Parcel.DeliveryMethod.PICKUP),
+            length_cm=attrs.get("length_cm"), width_cm=attrs.get("width_cm"), height_cm=attrs.get("height_cm"),
+        )
+        if quote is None:
+            raise serializers.ValidationError({"item_category": "No approved charge or matching route tariff is configured for this category."})
+        self.context["price_quote"] = quote
+        if attrs.get("amount_paid", 0) > quote["charge"]:
             raise serializers.ValidationError({"amount_paid": "Amount paid cannot exceed the mapped charge."})
         return attrs
 
     def create(self, validated_data):
-        validated_data["charge"] = validated_data["item_category"].charge
+        validated_data["charge"] = self.context["price_quote"]["charge"]
         validated_data["is_paid"] = validated_data.get("amount_paid", 0) >= validated_data["charge"]
         return Parcel.objects.create(**validated_data)
 
@@ -511,14 +538,12 @@ def driver_export(request):
 @api_view(["GET", "POST"])
 def item_category_list(request):
     if request.method == "GET":
-        qs = ItemCategory.objects.all() if request.user.is_superuser and request.query_params.get("all") == "true" else ItemCategory.objects.filter(is_active=True, charge__isnull=False)
+        qs = ItemCategory.objects.all() if request.user.is_superuser and request.query_params.get("all") == "true" else ItemCategory.objects.filter(is_active=True)
         return Response(ItemCategorySerializer(qs, many=True).data)
     if not request.user.is_superuser:
         return Response({"detail": "Only the super administrator can change the approved category price list."}, status=403)
     serializer = ItemCategorySerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    if serializer.validated_data.get("charge") is None and serializer.validated_data.get("is_active"):
-        return Response({"charge": ["Add an approved charge before activating a category."]}, status=400)
     return Response(ItemCategorySerializer(serializer.save()).data, status=201)
 
 
@@ -532,8 +557,6 @@ def item_category_update(request, category_id):
         return Response({"detail": "Category not found."}, status=404)
     serializer = ItemCategorySerializer(category, data=request.data, partial=True)
     serializer.is_valid(raise_exception=True)
-    if serializer.validated_data.get("is_active", category.is_active) and serializer.validated_data.get("charge", category.charge) is None:
-        return Response({"charge": ["Add an approved charge before activating a category."]}, status=400)
     return Response(ItemCategorySerializer(serializer.save()).data)
 
 
@@ -548,6 +571,126 @@ def item_category_export(request):
     for item in qs:
         writer.writerow([item.name, item.code, item.description, item.charge])
     return response
+
+
+@extend_schema(
+    tags=["Pricing"],
+    summary="Estimate parcel charges and research item value",
+    description=(
+        "Calculates a transparent estimate using the configured origin/destination, category and service tariff. "
+        "It considers actual or volumetric weight, quantity, declared value and doorstep delivery. "
+        "When configured, Gemini Google Search grounding returns a separately sourced market-value suggestion. "
+        "That suggestion is never used as declared value until the sender/staff confirms it."
+    ),
+    request=ParcelPriceEstimateSerializer,
+    responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT, 429: OpenApiTypes.OBJECT},
+)
+@api_view(["POST"])
+@throttle_classes([PricingEstimateThrottle])
+def parcel_price_estimate(request):
+    denied = permission_denied(request.user, "parcels.create")
+    if denied:
+        return denied
+    serializer = ParcelPriceEstimateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    data = serializer.validated_data
+    _, station = staff_role(request.user)
+    if not request.user.is_superuser and data["origin"] != station:
+        return Response({"origin": ["Quotes must use your assigned origin station."]}, status=403)
+    quote = calculate_parcel_charge(
+        origin=data["origin"], destination=data["destination"], category=data["item_category"],
+        service_type=data["service_type"], weight_kg=data["weight_kg"], quantity=data["quantity"],
+        declared_value=data["declared_value"], delivery_method=data["delivery_method"],
+        length_cm=data.get("length_cm"), width_cm=data.get("width_cm"), height_cm=data.get("height_cm"),
+    )
+    if quote is None:
+        return Response({
+            "detail": "No approved tariff is configured for this category and route.",
+            "next_step": "A super administrator must configure a route pricing rule or an approved category charge.",
+        }, status=409)
+
+    pricing_settings, _ = ParcelPricingSettings.objects.get_or_create(pk=1)
+    market_value = None
+    if not pricing_settings.auto_charge_enabled:
+        market_value = {"status": "disabled", "message": "Automatic pricing is disabled; category charge only is being used."}
+    elif data["lookup_market_value"]:
+        market_value = lookup_market_value(
+            description=data["description"], category=data["item_category"].name,
+            destination=data["destination"].name,
+        )
+    quote.update({
+        "origin": {"id": data["origin"].id, "name": data["origin"].name},
+        "destination": {"id": data["destination"].id, "name": data["destination"].name},
+        "category": {"id": data["item_category"].id, "name": data["item_category"].name},
+        "service_type": data["service_type"],
+        "delivery_method": data["delivery_method"],
+        "quantity": data["quantity"],
+        "declared_value_used": data["declared_value"],
+        "market_value": market_value,
+        "confirmation_required": bool(market_value and market_value.get("status") == "suggested"),
+    })
+    return Response(quote)
+
+
+@extend_schema(
+    tags=["Pricing"], summary="Read or update automatic parcel pricing settings",
+    description="Authenticated users can read pricing settings. Only the super administrator may change the automatic pricing switch and starter tariff values. Disabling automatic pricing uses only the existing item category charge.",
+    request=ParcelPricingSettingsSerializer,
+    responses={200: ParcelPricingSettingsSerializer, 403: OpenApiTypes.OBJECT},
+)
+@api_view(["GET", "PATCH"])
+def parcel_pricing_settings(request):
+    instance, _ = ParcelPricingSettings.objects.get_or_create(pk=1)
+    if request.method == "GET":
+        return Response(ParcelPricingSettingsSerializer(instance).data)
+    if not request.user.is_superuser:
+        return Response({"detail": "Only the super administrator can change automatic pricing settings."}, status=403)
+    serializer = ParcelPricingSettingsSerializer(instance, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save(updated_by=request.user)
+    return Response(serializer.data)
+
+
+@extend_schema(
+    tags=["Pricing"], summary="List or create parcel route tariffs",
+    description="All authenticated staff may view active tariffs. Super administrators may create tariff mappings. A tariff is unique by origin, destination, item category and service type.",
+    request=ParcelPricingRuleSerializer,
+    responses={200: ParcelPricingRuleSerializer(many=True), 201: ParcelPricingRuleSerializer, 400: OpenApiTypes.OBJECT, 403: OpenApiTypes.OBJECT},
+)
+@api_view(["GET", "POST"])
+def parcel_pricing_rules(request):
+    if request.method == "GET":
+        qs = ParcelPricingRule.objects.select_related("origin", "destination", "item_category")
+        if not request.user.is_superuser:
+            qs = qs.filter(is_active=True)
+        return Response(ParcelPricingRuleSerializer(qs, many=True).data)
+    if not request.user.is_superuser:
+        return Response({"detail": "Only the super administrator can change route tariffs."}, status=403)
+    serializer = ParcelPricingRuleSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    return Response(ParcelPricingRuleSerializer(serializer.save()).data, status=201)
+
+
+@extend_schema(
+    tags=["Pricing"], summary="Update or deactivate a parcel route tariff",
+    description="Super administrator only. DELETE deactivates the tariff so it remains in historical configuration records.",
+    request=ParcelPricingRuleSerializer,
+    responses={200: ParcelPricingRuleSerializer, 403: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT},
+)
+@api_view(["PATCH", "DELETE"])
+def parcel_pricing_rule_detail(request, rule_id):
+    if not request.user.is_superuser:
+        return Response({"detail": "Only the super administrator can change route tariffs."}, status=403)
+    rule = ParcelPricingRule.objects.select_related("origin", "destination", "item_category").filter(pk=rule_id).first()
+    if not rule:
+        return Response({"detail": "Pricing rule not found."}, status=404)
+    if request.method == "DELETE":
+        rule.is_active = False
+        rule.save(update_fields=["is_active", "updated_at"])
+        return Response({"detail": "Pricing rule deactivated."})
+    serializer = ParcelPricingRuleSerializer(rule, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    return Response(ParcelPricingRuleSerializer(serializer.save()).data)
 
 
 @extend_schema(

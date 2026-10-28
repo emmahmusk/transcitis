@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
-from .models import ItemCategory, OperationalException, Parcel, ParcelEvent, StaffProfile, Station, Trip
+from .models import ItemCategory, OperationalException, Parcel, ParcelEvent, ParcelPricingRule, ParcelPricingSettings, StaffProfile, Station, Trip
 from .permissions import PERMISSION_CATALOG
 
 
@@ -72,7 +72,7 @@ class ParcelSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Parcel
-        fields = ["id", "parcel_id", "sender_name", "sender_phone", "receiver_name", "receiver_phone", "delivery_address", "origin", "origin_name", "destination", "destination_name", "item_category", "category_name", "description", "service_type", "quantity", "weight_kg", "declared_value", "delivery_method", "charge", "amount_paid", "payment_method", "payment_reference", "is_paid", "status", "status_label", "handover_pin", "receipt_print_count", "courier", "courier_name", "created_at", "updated_at", "events"]
+        fields = ["id", "parcel_id", "sender_name", "sender_phone", "receiver_name", "receiver_phone", "delivery_address", "origin", "origin_name", "destination", "destination_name", "item_category", "category_name", "description", "service_type", "quantity", "weight_kg", "length_cm", "width_cm", "height_cm", "declared_value", "delivery_method", "charge", "amount_paid", "payment_method", "payment_reference", "is_paid", "status", "status_label", "handover_pin", "receipt_print_count", "courier", "courier_name", "created_at", "updated_at", "events"]
         read_only_fields = ["id", "parcel_id", "status", "handover_pin", "receipt_print_count", "charge", "is_paid", "created_at", "updated_at", "events"]
 
     def validate(self, attrs):
@@ -134,6 +134,80 @@ class ItemCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ItemCategory
         fields = ["id", "name", "code", "description", "charge", "is_active"]
+
+
+class ParcelPricingRuleSerializer(serializers.ModelSerializer):
+    origin_name = serializers.CharField(source="origin.name", read_only=True)
+    destination_name = serializers.CharField(source="destination.name", read_only=True)
+    category_name = serializers.CharField(source="item_category.name", read_only=True)
+
+    class Meta:
+        model = ParcelPricingRule
+        fields = ["id", "origin", "origin_name", "destination", "destination_name", "item_category", "category_name", "service_type", "base_charge", "included_weight_kg", "additional_kg_charge", "volumetric_divisor", "declared_value_rate_percent", "doorstep_charge", "extra_unit_charge", "minimum_charge", "is_active", "updated_at"]
+        read_only_fields = ["id", "updated_at"]
+
+    def validate(self, attrs):
+        origin = attrs.get("origin", getattr(self.instance, "origin", None))
+        destination = attrs.get("destination", getattr(self.instance, "destination", None))
+        if origin and destination and origin == destination:
+            raise serializers.ValidationError({"destination": "Origin and destination must be different stations."})
+        category = attrs.get("item_category", getattr(self.instance, "item_category", None))
+        if category and not category.is_active:
+            raise serializers.ValidationError({"item_category": "Pricing rules can only be assigned to active categories."})
+        if attrs.get("volumetric_divisor", getattr(self.instance, "volumetric_divisor", 5000)) <= 0:
+            raise serializers.ValidationError({"volumetric_divisor": "Must be greater than zero."})
+        for name in ("base_charge", "included_weight_kg", "additional_kg_charge", "declared_value_rate_percent", "doorstep_charge", "extra_unit_charge", "minimum_charge"):
+            value = attrs.get(name, getattr(self.instance, name, 0) if self.instance else 0)
+            if value < 0:
+                raise serializers.ValidationError({name: "This value cannot be negative."})
+        if origin and destination and category:
+            service = attrs.get("service_type", getattr(self.instance, "service_type", ParcelPricingRule.ServiceType.STANDARD))
+            duplicates = ParcelPricingRule.objects.filter(origin=origin, destination=destination, item_category=category, service_type=service)
+            if self.instance:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            if duplicates.exists():
+                raise serializers.ValidationError("A tariff already exists for this route, category and service level.")
+        return attrs
+
+
+class ParcelPricingSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ParcelPricingSettings
+        fields = ["auto_charge_enabled", "default_route_charge", "default_included_weight_kg", "default_additional_kg_charge", "default_volumetric_divisor", "default_declared_value_rate_percent", "default_doorstep_charge", "default_extra_unit_charge", "default_minimum_charge", "updated_at"]
+        read_only_fields = ["updated_at"]
+
+    def validate(self, attrs):
+        for name in ("default_route_charge", "default_included_weight_kg", "default_additional_kg_charge", "default_declared_value_rate_percent", "default_doorstep_charge", "default_extra_unit_charge", "default_minimum_charge"):
+            value = attrs.get(name, getattr(self.instance, name, 0) if self.instance else 0)
+            if value < 0:
+                raise serializers.ValidationError({name: "This value cannot be negative."})
+        if attrs.get("default_volumetric_divisor", getattr(self.instance, "default_volumetric_divisor", 5000)) <= 0:
+            raise serializers.ValidationError({"default_volumetric_divisor": "Must be greater than zero."})
+        return attrs
+
+
+class ParcelPriceEstimateSerializer(serializers.Serializer):
+    description = serializers.CharField(max_length=180)
+    item_category = serializers.PrimaryKeyRelatedField(queryset=ItemCategory.objects.filter(is_active=True))
+    origin = serializers.PrimaryKeyRelatedField(queryset=Station.objects.filter(is_active=True))
+    destination = serializers.PrimaryKeyRelatedField(queryset=Station.objects.filter(is_active=True))
+    service_type = serializers.ChoiceField(choices=Parcel.ServiceType.choices, default=Parcel.ServiceType.STANDARD)
+    delivery_method = serializers.ChoiceField(choices=Parcel.DeliveryMethod.choices, default=Parcel.DeliveryMethod.PICKUP)
+    weight_kg = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, default=0)
+    length_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
+    width_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
+    height_cm = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=0, required=False, allow_null=True)
+    quantity = serializers.IntegerField(min_value=1, max_value=32767, default=1)
+    declared_value = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0, required=False, default=0)
+    lookup_market_value = serializers.BooleanField(default=True)
+
+    def validate(self, attrs):
+        if attrs["origin"] == attrs["destination"]:
+            raise serializers.ValidationError({"destination": "Origin and destination must be different stations."})
+        dimensions = [attrs.get("length_cm"), attrs.get("width_cm"), attrs.get("height_cm")]
+        if any(value is not None for value in dimensions) and not all(value is not None for value in dimensions):
+            raise serializers.ValidationError("Enter all three parcel dimensions to use volumetric weight.")
+        return attrs
 
 
 class StaffInviteSerializer(serializers.Serializer):

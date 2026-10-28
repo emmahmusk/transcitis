@@ -65,7 +65,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["operations.authentication.CookieOrHeaderJWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "60/hour", "user": "1200/hour"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "60/hour", "user": "1200/hour", "pricing-estimate": "80/day"},
 }
 from datetime import timedelta
 SIMPLE_JWT = {
@@ -88,7 +88,7 @@ SPECTACULAR_SETTINGS = {
         {"name": "Stations", "description": "Station directory and operations configuration."},
         {"name": "Authentication", "description": "JWT login, refresh, logout and current staff profile."},
         {"name": "User management", "description": "Staff invitations, station assignments, role permissions and access control."},
-        {"name": "Pricing", "description": "Approved item categories and mapped charges."},
+        {"name": "Pricing", "description": "Category catalogs, route tariffs, charge estimates and sourced market-value suggestions."},
         {"name": "Receipts", "description": "80 mm thermal receipts with controlled reprints."},
     ],
     "APPEND_COMPONENTS": {"securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}}},

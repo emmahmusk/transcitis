@@ -6,6 +6,8 @@ Transcitis Courier Operations is a Django application that serves the responsive
 
 - Station-scoped parcel registration, scan and search, exception handling, event history, handover, and CSV export.
 - Configurable item categories with charge mapping. Initial category names are seeded with rates unset and inactive; parcels cannot be registered against a category until an approved charge is configured and activated.
+- Route-based charge estimates for category, origin/destination, service level, actual/volumetric weight, declared value, delivery method, and quantity. Superadmins manage these tariffs from the Pricing screen.
+- Optional product market-value suggestions from Gemini with Google Search grounding. Results include sources and require human confirmation before they can affect a declared-value charge.
 - Trip manifests with assigned drivers, keyboard-wedge barcode scanning, immediate parcel feedback, dispatch confirmation, arrival scanning, and printable parcel-level manifests.
 - Two-page 80 mm thermal receipts: customer receipt with amount paid, then a Code 128 barcode copy with parcel details and no amount-paid value. Receipt print history is audited; only a Django superuser can reprint after the first print.
 - JWT authentication with user, role, station, and permissions claims in access tokens; staff invitation and password setup; user and driver administration.
@@ -44,9 +46,17 @@ SITE_URL=https://operations.example.com
 
 When SMTP is not configured, development uses Django's console email backend; the invitation API returns the link in debug mode or when delivery fails. Configure production secrets through the hosting provider, not in source control.
 
-## Category and charge mapping
+## Category and parcel charge mapping
 
-The initial catalog contains Documents, Clothing & accessories, Electronics, Food & perishables, Fragile goods, Household items, Auto parts, and Other. Charges are intentionally `unset`; no rates were supplied for this implementation. The super administrator can add or maintain approved charges through `/admin/` or the Pricing API. Set a charge before activating a category.
+The initial catalog contains Documents, Clothing & accessories, Electronics, Food & perishables, Fragile goods, Household items, Auto parts, and Other. Starter category and default-route amounts are seeded for immediate trial use; they are provisional and editable in the superadmin Pricing screen. A superadmin can replace them with agreed business rates.
+
+For a route with a configured tariff, the estimate is: base charge + charge for billable weight above the included weight + declared-value percentage + doorstep fee (when selected) + fee per additional unit, subject to the configured minimum charge. Billable weight is the greater of actual weight and volumetric weight (`length × width × height ÷ volumetric divisor`).
+
+If a matching route tariff has not been configured, the editable default route settings are added to the category charge. If automatic pricing is switched off, only the category's flat charge is used, preserving the previous method. Parcels without a category charge cannot be registered.
+
+`POST /api/pricing/estimate/` returns the estimated charge, a component breakdown, the weight used, and—when configured—a separately sourced item market-value suggestion. Parcel registration requests updated estimates from the same API as the route, category, item description, and parcel measurements are entered. The API never uses the suggested market value as the declared value without staff confirmation. `GET, PATCH /api/pricing/settings/` reads or updates the automatic-pricing switch and starter tariff values; only Django superusers can change them. `POST /api/pricing/rules/` creates a route/category/service tariff, and `PATCH` or `DELETE /api/pricing/rules/{id}/` updates or deactivates one.
+
+To enable Google market-value suggestions, set `GOOGLE_GEMINI_API_KEY` in the environment. The old Google Custom Search JSON API is closed to new customers; this optional lookup uses Gemini's Google Search grounding instead. Google currently provides a limited free search allowance, then bills by search request; a single request can trigger multiple web searches. See [Google Search grounding pricing and limits](https://ai.google.dev/gemini-api/docs/google-search). If the key is absent or lookup fails, staff can enter the declared value manually and still receive a tariff estimate.
 
 See [`docs/item-category-charges.md`](docs/item-category-charges.md) for the mapping register. CSV export is available from `/api/item-categories/export/` for active categories with configured charges.
 
@@ -63,7 +73,7 @@ See [`docs/item-category-charges.md`](docs/item-category-charges.md) for the map
 | Handover | `POST /api/parcels/{parcel_id}/ready-handover/`, `POST /api/parcels/{parcel_id}/assign-courier/`, `POST /api/parcels/{parcel_id}/handover/` |
 | Exceptions | `GET, POST /api/exceptions/`, `POST /api/exceptions/{id}/resolve/` |
 | User management | `GET, POST /api/users/`, `PATCH /api/users/{id}/`, `GET /api/users/drivers/`, `GET, PUT /api/roles/permissions/`, `GET /api/stations/` |
-| Pricing | `GET, POST /api/item-categories/`, `PATCH /api/item-categories/{id}/`, `GET /api/item-categories/export/` |
+| Pricing | `GET, POST /api/item-categories/`, `PATCH /api/item-categories/{id}/`, `POST /api/pricing/estimate/`, `GET, PATCH /api/pricing/settings/`, `GET, POST /api/pricing/rules/`, `PATCH, DELETE /api/pricing/rules/{id}/`, `GET /api/item-categories/export/` |
 | Reports | `GET /api/parcels/export/` |
 
 ## Printer setup

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Invitation, ItemCategory, OperationalException, Parcel, ParcelEvent, ReceiptPrint, RolePermission, StaffProfile, Station, Trip
+from .models import Invitation, ItemCategory, OperationalException, Parcel, ParcelEvent, ParcelPricingRule, ParcelPricingSettings, ReceiptPrint, RolePermission, StaffProfile, Station, Trip
 
 
 @admin.register(ItemCategory)
@@ -7,6 +7,18 @@ class ItemCategoryAdmin(admin.ModelAdmin):
     list_display = ("name", "code", "charge", "is_active", "updated_at")
     list_filter = ("is_active",)
     search_fields = ("name", "code", "description")
+
+
+@admin.register(ParcelPricingRule)
+class ParcelPricingRuleAdmin(admin.ModelAdmin):
+    list_display = ("origin", "destination", "item_category", "service_type", "base_charge", "is_active", "updated_at")
+    list_filter = ("origin", "destination", "item_category", "service_type", "is_active")
+
+
+@admin.register(ParcelPricingSettings)
+class ParcelPricingSettingsAdmin(admin.ModelAdmin):
+    list_display = ("auto_charge_enabled", "default_route_charge", "default_additional_kg_charge", "updated_at")
+    readonly_fields = ("updated_at", "updated_by")
 
 
 @admin.register(ReceiptPrint)

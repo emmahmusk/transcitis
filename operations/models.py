@@ -82,6 +82,9 @@ class Parcel(models.Model):
     service_type = models.CharField(max_length=16, choices=ServiceType.choices, default=ServiceType.STANDARD)
     quantity = models.PositiveSmallIntegerField(default=1)
     weight_kg = models.DecimalField(max_digits=7, decimal_places=2, default=0)
+    length_cm = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    width_cm = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    height_cm = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
     declared_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     delivery_method = models.CharField(max_length=12, choices=DeliveryMethod.choices, default=DeliveryMethod.PICKUP)
     charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -193,9 +196,67 @@ class ItemCategory(models.Model):
     def __str__(self):
         return self.name
 
+class ParcelPricingRule(models.Model):
+    """Superadmin-maintained tariff for a route, category and service level."""
+
+    class ServiceType(models.TextChoices):
+        STANDARD = "standard", "Standard"
+        EXPRESS = "express", "Express"
+
+    origin = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="pricing_origins")
+    destination = models.ForeignKey(Station, on_delete=models.CASCADE, related_name="pricing_destinations")
+    item_category = models.ForeignKey(ItemCategory, on_delete=models.CASCADE, related_name="pricing_rules")
+    service_type = models.CharField(max_length=16, choices=ServiceType.choices, default=ServiceType.STANDARD)
+    base_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    included_weight_kg = models.DecimalField(max_digits=7, decimal_places=2, default=1)
+    additional_kg_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    volumetric_divisor = models.PositiveIntegerField(default=5000, help_text="Volumetric kg = L × W × H (cm) divided by this value.")
+    declared_value_rate_percent = models.DecimalField(max_digits=6, decimal_places=3, default=0)
+    doorstep_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    extra_unit_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    minimum_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["origin__name", "destination__name", "item_category__name", "service_type"]
+        constraints = [models.UniqueConstraint(fields=["origin", "destination", "item_category", "service_type"], name="unique_parcel_pricing_route_category_service")]
+
     def clean(self):
-        if self.is_active and self.charge is None:
-            raise ValidationError({"charge": "Set an approved charge before activating this category."})
+        if self.origin_id and self.destination_id and self.origin_id == self.destination_id:
+            raise ValidationError({"destination": "Origin and destination must be different stations."})
+        if self.volumetric_divisor <= 0:
+            raise ValidationError({"volumetric_divisor": "Volumetric divisor must be greater than zero."})
+
+    def __str__(self):
+        return f"{self.origin.code} → {self.destination.code} · {self.item_category.name} · {self.service_type}"
+
+
+class ParcelPricingSettings(models.Model):
+    """Singleton for auto-pricing and editable starter tariff defaults."""
+
+    auto_charge_enabled = models.BooleanField(default=True)
+    default_route_charge = models.DecimalField(max_digits=10, decimal_places=2, default=1000)
+    default_included_weight_kg = models.DecimalField(max_digits=7, decimal_places=2, default=1)
+    default_additional_kg_charge = models.DecimalField(max_digits=10, decimal_places=2, default=500)
+    default_volumetric_divisor = models.PositiveIntegerField(default=5000)
+    default_declared_value_rate_percent = models.DecimalField(max_digits=6, decimal_places=3, default=1)
+    default_doorstep_charge = models.DecimalField(max_digits=10, decimal_places=2, default=1500)
+    default_extra_unit_charge = models.DecimalField(max_digits=10, decimal_places=2, default=250)
+    default_minimum_charge = models.DecimalField(max_digits=10, decimal_places=2, default=1500)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="updated_parcel_pricing_settings")
+
+    class Meta:
+        verbose_name = "parcel pricing settings"
+        verbose_name_plural = "parcel pricing settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return "Parcel pricing settings"
 
 
 class ReceiptPrint(models.Model):
